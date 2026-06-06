@@ -7,8 +7,8 @@ const MAX_AGE:        u32   = 80_000;
 const REPRODUCE_PROB: u32   = 30;
 const COOLDOWN:       u32   = 2000;
 const STARVATION_AGE: u32   = 5000;
-const QUORUM_DECAY:   f32   = 0.995; // semivida ~138 pasos ≈ 10ms por bacteria
-const QUORUM_THRESH:  f32   = 5.0;   // umbral mínimo para considerar zona de colonia
+const QUORUM_DECAY:   f32   = 0.970; // semivida ~23 pasos — señal discrimina concentración real
+const QUORUM_THRESH:  f32   = 5.0;   // umbral: necesita ~4 bacterias concentradas para activarse
 
 // ── XorShift32 ───────────────────────────────────────────────────────────────
 
