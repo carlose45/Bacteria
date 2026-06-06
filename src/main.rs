@@ -1,6 +1,7 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::Write;
+use rayon::prelude::*;
 
 const MAX_POP:        usize = 12;
 const MAX_AGE:        u32   = 80_000;
@@ -170,6 +171,7 @@ struct Bacteria {
     rewards:     VecDeque<f32>,
     age:         u32,
     cooldown:    u32,
+    rng:         XorShift32, // RNG propio: necesario para ejecución en hilo independiente
 }
 
 impl Bacteria {
@@ -183,6 +185,7 @@ impl Bacteria {
             rewards:     VecDeque::with_capacity(200),
             age:         0,
             cooldown:    0,
+            rng:         XorShift32::new(rng.next_u32()),
         }
     }
 
@@ -205,11 +208,11 @@ impl Bacteria {
 
     // Devuelve (nueva_posicion, valor_a_escribir, reward)
     // quorum: señal social acumulada por todas las bacterias en cada posición
-    fn step(&mut self, memory: &[u8], quorum: &[f32], rng: &mut XorShift32) -> (usize, u8, f32) {
+    fn step(&mut self, memory: &[u8], quorum: &[f32]) -> (usize, u8, f32) {
         let value_read = memory[self.position];
         let prev_state = self.state;
         let q_grad = quorum_neighborhood(self.position, quorum);
-        let (bits, logits) = self.transformer.forward(value_read, self.position, &prev_state, &q_grad, rng, 0.20);
+        let (bits, logits) = self.transformer.forward(value_read, self.position, &prev_state, &q_grad, &mut self.rng, 0.20);
 
         let new_pos = bits.iter().enumerate()
             .fold(0usize, |acc, (i, &b)| acc + ((b as usize) << i))
@@ -307,6 +310,7 @@ fn crossover(a: &Bacteria, b: &Bacteria, rng: &mut XorShift32) -> Bacteria {
         rewards:     VecDeque::with_capacity(200),
         age:         0,
         cooldown:    COOLDOWN,
+        rng:         XorShift32::new(rng.next_u32()),
     }
 }
 
@@ -440,12 +444,18 @@ fn main() {
     let mut step = 0u32;
 
     loop {
-        // Paso de cada bacteria — acumula quorum en posición visitada
-        for b in &mut population {
-            let (new_pos, store, _) = b.step(&memory, &quorum, &mut rng);
+        // Fase 1 — paralela: cada bacteria lee snapshot y computa en su hilo
+        let mem_snap = memory.clone();
+        let qm_snap  = quorum.clone();
+        let updates: Vec<(usize, u8)> = population
+            .par_iter_mut()
+            .map(|b| { let (p, s, _) = b.step(&mem_snap, &qm_snap); (p, s) })
+            .collect();
+
+        // Fase 2 — secuencial: aplica writes al estado compartido
+        for &(new_pos, store) in &updates {
             memory[new_pos] = store;
             quorum[new_pos] += 1.0;
-            // Depósito difuso: 4 vecinos cardinales reciben 0.3 → zona de 5 celdas
             let row = new_pos / 16;
             let col = new_pos % 16;
             for &n in &[
