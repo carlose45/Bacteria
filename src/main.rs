@@ -213,7 +213,10 @@ impl Bacteria {
         self.age += 1;
         if self.cooldown > 0 { self.cooldown -= 1; }
 
-        let store = ((new_pos * 3 + self.age as usize) % 256) as u8;
+        // Estigmergía: escribe densidad de exploración propia en la memoria compartida.
+        // Otras bacterias leen este valor y el transformer aprende a interpretar
+        // valores bajos = "zona inexplorada, ve aquí" / altos = "zona saturada, evita".
+        let store = (self.visits[new_pos] * 6.5).min(255.0) as u8;
         (new_pos, store, reward)
     }
 
@@ -365,6 +368,7 @@ fn main() {
     };
     let mut history: VecDeque<String> = VecDeque::with_capacity(100);
     let mut last_snapshot = std::time::Instant::now();
+    let mut last_print   = std::time::Instant::now();
     let mut snapshot_count = 0usize;
     let mut step = 0u32;
 
@@ -414,8 +418,11 @@ fn main() {
             if history.len() > 100 { history.pop_front(); }
         }
 
-        // Mapa en terminal (cada 500 pasos)
-        if step % 500 == 0 { print_map(&population, step); }
+        // Mapa en terminal (máximo 2 veces/segundo — evita saturar el buffer del terminal)
+        if last_print.elapsed().as_millis() >= 500 {
+            print_map(&population, step);
+            last_print = std::time::Instant::now();
+        }
 
         // Snapshot cada 60 segundos, máximo 10
         if snapshot_count < 10 && last_snapshot.elapsed().as_secs() >= 60 {
