@@ -1,0 +1,4 @@
+/target/
+snapshot_*.txt
+ultimo_historico.txt
+neurona_state.bin
