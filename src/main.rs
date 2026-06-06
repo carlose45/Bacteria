@@ -28,6 +28,30 @@ impl XorShift32 {
     }
 }
 
+// ── Quorum neighborhood ──────────────────────────────────────────────────────
+
+// Devuelve el gradiente de quorum en 8 direcciones (N NE E SE S SW W NW)
+// relativo a la posición actual, en la cuadrícula 16×16 toroidal.
+// Cada componente está en [-1, 1] via tanh.
+fn quorum_neighborhood(pos: usize, quorum: &[f32]) -> [f32; 8] {
+    let row = pos / 16;
+    let col = pos % 16;
+    let nbrs = [
+        ((row + 15) % 16) * 16 + col,                // N
+        ((row + 15) % 16) * 16 + (col +  1) % 16,   // NE
+        row * 16             + (col +  1) % 16,      // E
+        ((row +  1) % 16) * 16 + (col +  1) % 16,   // SE
+        ((row +  1) % 16) * 16 + col,                // S
+        ((row +  1) % 16) * 16 + (col + 15) % 16,   // SW
+        row * 16             + (col + 15) % 16,      // W
+        ((row + 15) % 16) * 16 + (col + 15) % 16,   // NW
+    ];
+    let q0 = quorum[pos];
+    let mut g = [0f32; 8];
+    for i in 0..8 { g[i] = (quorum[nbrs[i]] - q0).tanh(); }
+    g
+}
+
 // ── MiniTransformer ──────────────────────────────────────────────────────────
 
 struct MiniTransformer {
@@ -57,11 +81,11 @@ impl MiniTransformer {
         (rng.next_u32() as f32 / 4294967296.0 - 0.5) * 1.0
     }
 
-    fn forward(&self, value: u8, position: usize, state: &[f32; 8], rng: &mut XorShift32, epsilon: f32) -> ([u8; 8], [f32; 8]) {
+    fn forward(&self, value: u8, position: usize, state: &[f32; 8], q_grad: &[f32; 8], rng: &mut XorShift32, epsilon: f32) -> ([u8; 8], [f32; 8]) {
         let ve = self.embedding_matrix[value as usize];
         let pe = self.embedding_matrix[position % 256];
         let mut emb = [0f32; 8];
-        for i in 0..8 { emb[i] = ve[i] + pe[i] + state[i] * 0.1; }
+        for i in 0..8 { emb[i] = ve[i] + pe[i] + state[i] * 0.1 + q_grad[i] * 0.5; }
 
         let attended = self.multihead_attention(&emb, state);
         let logits   = self.feedforward(&attended);
@@ -101,11 +125,11 @@ impl MiniTransformer {
         out
     }
 
-    fn learn(&mut self, value: u8, position: usize, state: &[f32; 8], logits: &[f32; 8], reward: f32) {
+    fn learn(&mut self, value: u8, position: usize, state: &[f32; 8], q_grad: &[f32; 8], logits: &[f32; 8], reward: f32) {
         let ve = self.embedding_matrix[value as usize];
         let pe = self.embedding_matrix[position % 256];
         let mut emb = [0f32; 8];
-        for i in 0..8 { emb[i] = ve[i] + pe[i] + state[i] * 0.1; }
+        for i in 0..8 { emb[i] = ve[i] + pe[i] + state[i] * 0.1 + q_grad[i] * 0.5; }
         let attended = self.multihead_attention(&emb, state);
         let hidden   = self.mm16(&self.ff_w1, &attended);
         let activated: [f32; 16] = hidden.map(|x| x.tanh());
@@ -184,7 +208,8 @@ impl Bacteria {
     fn step(&mut self, memory: &[u8], quorum: &[f32], rng: &mut XorShift32) -> (usize, u8, f32) {
         let value_read = memory[self.position];
         let prev_state = self.state;
-        let (bits, logits) = self.transformer.forward(value_read, self.position, &prev_state, rng, 0.20);
+        let q_grad = quorum_neighborhood(self.position, quorum);
+        let (bits, logits) = self.transformer.forward(value_read, self.position, &prev_state, &q_grad, rng, 0.20);
 
         let new_pos = bits.iter().enumerate()
             .fold(0usize, |acc, (i, &b)| acc + ((b as usize) << i))
@@ -200,7 +225,7 @@ impl Bacteria {
         // Quorum sensing: bonus por moverse hacia zonas con presencia de colonia.
         // El transformer aprende a correlacionar memory[pos] alto con este bonus.
         let q = quorum[new_pos];
-        let colony_bonus = (q / (QUORUM_THRESH + q)) * 0.4;
+        let colony_bonus = (q / (QUORUM_THRESH + q)) * 1.2;
 
         let reward = if new_pos == self.position {
             -0.8
@@ -208,7 +233,7 @@ impl Bacteria {
             novelty + 0.1 * memory_diff - 0.3 * recency + colony_bonus
         };
 
-        self.transformer.learn(value_read, self.position, &prev_state, &logits, reward);
+        self.transformer.learn(value_read, self.position, &prev_state, &q_grad, &logits, reward);
 
         self.recent.push_back(self.position);
         if self.recent.len() > 500 { self.recent.pop_front(); }
