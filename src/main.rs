@@ -225,11 +225,13 @@ impl Bacteria {
         // Quorum sensing: bonus por moverse hacia zonas con presencia de colonia.
         // El transformer aprende a correlacionar memory[pos] alto con este bonus.
         let q = quorum[new_pos];
-        let colony_bonus = (q / (QUORUM_THRESH + q)) * 1.2;
+        let q_eff = q.min(20.0); // cap: evita atractor infinito, preserva gradiente periferia
+        let colony_bonus = (q_eff / (QUORUM_THRESH + q_eff)) * 1.2;
 
-        // En zona de quorum alto la bacteria no es expulsada por recency:
-        // puede ciclar dentro de la colonia sin penalización creciente.
-        let recency_penalty = if q > QUORUM_THRESH { 0.0 } else { 0.3 * recency };
+        // Dentro de zona de quorum: recency mínima (0.005) para que rotas dentro
+        // de la zona sin apilarte; fuera: recency completa (0.3) fuerza exploración.
+        let recency_weight = if q > QUORUM_THRESH { 0.005 } else { 0.3 };
+        let recency_penalty = recency_weight * recency;
 
         let reward = if new_pos == self.position {
             -0.8
@@ -443,6 +445,15 @@ fn main() {
             let (new_pos, store, _) = b.step(&memory, &quorum, &mut rng);
             memory[new_pos] = store;
             quorum[new_pos] += 1.0;
+            // Depósito difuso: 4 vecinos cardinales reciben 0.3 → zona de 5 celdas
+            let row = new_pos / 16;
+            let col = new_pos % 16;
+            for &n in &[
+                ((row + 15) % 16) * 16 + col,
+                ((row +  1) % 16) * 16 + col,
+                row * 16 + (col +  1) % 16,
+                row * 16 + (col + 15) % 16,
+            ] { quorum[n] += 0.3; }
         }
         // Decay del campo de quorum (feromona que se evapora)
         for q in quorum.iter_mut() { *q *= QUORUM_DECAY; }
