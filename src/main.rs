@@ -227,10 +227,14 @@ impl Bacteria {
         let q = quorum[new_pos];
         let colony_bonus = (q / (QUORUM_THRESH + q)) * 1.2;
 
+        // En zona de quorum alto la bacteria no es expulsada por recency:
+        // puede ciclar dentro de la colonia sin penalización creciente.
+        let recency_penalty = if q > QUORUM_THRESH { 0.0 } else { 0.3 * recency };
+
         let reward = if new_pos == self.position {
             -0.8
         } else {
-            novelty + 0.1 * memory_diff - 0.3 * recency + colony_bonus
+            novelty + 0.1 * memory_diff - recency_penalty + colony_bonus
         };
 
         self.transformer.learn(value_read, self.position, &prev_state, &q_grad, &logits, reward);
