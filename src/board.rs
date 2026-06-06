@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::collections::VecDeque;
 use std::time::Instant;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::mpsc;
 use crate::actor::{bacteria_loop, BacteriaMsg, GenomeRequest, StepResult};
 use crate::bacteria::{crossover, Bacteria, XorShift32};
 use crate::food::FoodAgent;
@@ -12,6 +12,7 @@ use crate::display::{print_map, save_snapshot, save_history};
 
 // Metadatos livianos que el board guarda por cada bacteria activa
 struct BacteriaHandle {
+    tick_tx:       mpsc::Sender<Arc<WorldState>>,
     genome_req_tx: mpsc::Sender<GenomeRequest>,
 }
 
@@ -20,8 +21,6 @@ pub async fn board_loop(mut rng: XorShift32) {
     let mut world = WorldState::new();
 
     // ── Canales ───────────────────────────────────────────────────────────────
-    // tick_tx: board → todas las bacterias (broadcast del snapshot)
-    let (tick_tx, _) = broadcast::channel::<Arc<WorldState>>(4);
     // action_tx: todas las bacterias → board (canal compartido)
     let (action_tx, mut action_rx) = mpsc::channel::<BacteriaMsg>(MAX_POP * 4);
 
@@ -34,7 +33,7 @@ pub async fn board_loop(mut rng: XorShift32) {
     for i in 0..4 {
         let mut b = Bacteria::new(&mut rng);
         b.position = i * step_size;
-        spawn_bacteria(b, &mut next_id, &mut handles, &tick_tx, action_tx.clone());
+        spawn_bacteria(b, &mut next_id, &mut handles, action_tx.clone());
     }
 
     // ── Agentes de comida (gestionados en el board, no son actores) ───────────
@@ -57,13 +56,15 @@ pub async fn board_loop(mut rng: XorShift32) {
         if n_active == 0 {
             // Sin bacterias: crear una nueva
             let b = Bacteria::new(&mut rng);
-            spawn_bacteria(b, &mut next_id, &mut handles, &tick_tx, action_tx.clone());
+            spawn_bacteria(b, &mut next_id, &mut handles, action_tx.clone());
             continue;
         }
 
-        // 1. Snapshot inmutable del mundo y broadcast a todas las bacterias
+        // 1. Snapshot inmutable del mundo → enviado directamente a cada bacteria
         let snap = Arc::new(world.clone());
-        let _ = tick_tx.send(Arc::clone(&snap));
+        for (_, h) in &handles {
+            let _ = h.tick_tx.send(Arc::clone(&snap)).await;
+        }
 
         // 2. Recoger exactamente n_active acciones
         let mut results: Vec<StepResult> = Vec::with_capacity(n_active);
@@ -173,7 +174,7 @@ pub async fn board_loop(mut rng: XorShift32) {
                 }
             }
             if handles.len() < MAX_POP {
-                spawn_bacteria(child, &mut next_id, &mut handles, &tick_tx, action_tx.clone());
+                spawn_bacteria(child, &mut next_id, &mut handles, action_tx.clone());
             }
         }
 
@@ -232,19 +233,18 @@ pub async fn board_loop(mut rng: XorShift32) {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn spawn_bacteria(
-    b:        Bacteria,
-    next_id:  &mut usize,
-    handles:  &mut Vec<(usize, BacteriaHandle)>,
-    tick_tx:  &broadcast::Sender<Arc<WorldState>>,
+    b:         Bacteria,
+    next_id:   &mut usize,
+    handles:   &mut Vec<(usize, BacteriaHandle)>,
     action_tx: mpsc::Sender<BacteriaMsg>,
 ) {
-    let id      = *next_id;
-    *next_id   += 1;
-    let tick_rx = tick_tx.subscribe();
+    let id     = *next_id;
+    *next_id  += 1;
+    let (tick_tx_b, tick_rx_b)         = mpsc::channel::<Arc<WorldState>>(4);
     let (genome_req_tx, genome_req_rx) = mpsc::channel::<GenomeRequest>(2);
 
-    tokio::spawn(bacteria_loop(b, id, tick_rx, action_tx, genome_req_rx));
-    handles.push((id, BacteriaHandle { genome_req_tx }));
+    tokio::spawn(bacteria_loop(b, id, tick_rx_b, action_tx, genome_req_rx));
+    handles.push((id, BacteriaHandle { tick_tx: tick_tx_b, genome_req_tx }));
 }
 
 async fn request_crossover(

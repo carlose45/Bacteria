@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::fs::File;
-use std::io::Write;
+use std::io::{self, Write};
 use crate::actor::StepResult;
 use crate::food::FoodAgent;
 use crate::world::*;
@@ -58,9 +58,11 @@ pub fn print_map(
     step:        u32,
     pop:         usize,
 ) {
-    // Visitas combinadas aproximadas (usamos posición actual como proxy)
+    // Visitas combinadas de todas las bacterias (acumuladas via hot_cells)
     let mut cv = vec![0f32; GRID_SIZE];
-    for r in results { cv[r.position] += 1.0; }
+    for r in results {
+        for &(pos, val) in &r.hot_cells { cv[pos] += val; }
+    }
 
     let zones = colony_zones(quorum);
     let q_max = quorum.iter().cloned().fold(0f32, f32::max);
@@ -88,6 +90,7 @@ pub fn print_map(
         println!();
     }
     println!("\n  0-F.. bacteria  F comida  @ núcleo  * colonia  f señal  + tibio  . frío");
+    let _ = io::stdout().flush();
 }
 
 pub fn save_snapshot(
@@ -100,7 +103,9 @@ pub fn save_snapshot(
     trigger:     &str,
 ) {
     let mut cv = vec![0f32; GRID_SIZE];
-    for r in results { cv[r.position] += 1.0; }
+    for r in results {
+        for &(pos, val) in &r.hot_cells { cv[pos] += val; }
+    }
 
     let zones = colony_zones(quorum);
     let q_max = quorum.iter().cloned().fold(0f32, f32::max);

@@ -1,7 +1,7 @@
 // Ciclo de vida async de cada bacteria y tipos de mensajes
 
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot};
 use crate::bacteria::Bacteria;
 use crate::world::WorldState;
 
@@ -15,9 +15,12 @@ pub struct StepResult {
     pub position:   usize,
     pub fitness:    f32,
     pub diversity:  f32,
+    pub coverage:   f32,
     pub age:        u32,
     pub cooldown:   u32,
     pub should_die: bool,
+    // Visitas acumuladas para el mapa de calor (solo las > umbral)
+    pub hot_cells:  Vec<(usize, f32)>,
 }
 
 pub enum BacteriaMsg {
@@ -32,7 +35,7 @@ pub type GenomeRequest = oneshot::Sender<Box<Bacteria>>;
 pub async fn bacteria_loop(
     mut bacteria:      Bacteria,
     id:                usize,
-    mut tick_rx:       broadcast::Receiver<Arc<WorldState>>,
+    mut tick_rx:       mpsc::Receiver<Arc<WorldState>>,
     action_tx:         mpsc::Sender<BacteriaMsg>,
     mut genome_req_rx: mpsc::Receiver<GenomeRequest>,
 ) {
@@ -41,8 +44,8 @@ pub async fn bacteria_loop(
             // Tick normal: recibe snapshot, computa, responde
             result = tick_rx.recv() => {
                 let snap = match result {
-                    Ok(s)  => s,
-                    Err(_) => break,  // board cerró el canal → apagar
+                    Some(s) => s,
+                    None    => break,
                 };
 
                 // CPU-bound: step del transformer (síncrono dentro de la task async)
@@ -53,6 +56,12 @@ pub async fn bacteria_loop(
                 let should_die = bacteria.age > crate::world::MAX_AGE
                     || bacteria.is_starving();
 
+                // Comprime las visitas: solo celdas con valor > 20 para no saturar el canal
+                let hot_cells: Vec<(usize, f32)> = bacteria.visits.iter().enumerate()
+                    .filter(|(_, &v)| v > 20.0)
+                    .map(|(i, &v)| (i, v))
+                    .collect();
+
                 let msg = BacteriaMsg::Step(StepResult {
                     id,
                     new_pos,
@@ -61,9 +70,11 @@ pub async fn bacteria_loop(
                     position:   bacteria.position,
                     fitness:    bacteria.fitness(),
                     diversity:  bacteria.recent_diversity(),
+                    coverage:   bacteria.coverage(),
                     age:        bacteria.age,
                     cooldown:   bacteria.cooldown,
                     should_die,
+                    hot_cells,
                 });
 
                 if action_tx.send(msg).await.is_err() { break; }
