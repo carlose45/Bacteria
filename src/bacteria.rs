@@ -147,6 +147,7 @@ pub struct Bacteria {
     pub age:         u32,
     pub cooldown:    u32,
     pub rng:         XorShift32,
+    pub energy:      f32,
 }
 
 impl Bacteria {
@@ -161,6 +162,7 @@ impl Bacteria {
             age:         0,
             cooldown:    0,
             rng:         XorShift32::new(rng.next_u32()),
+            energy:      MAX_BACTERIA_ENERGY * 0.5,
         }
     }
 
@@ -181,7 +183,11 @@ impl Bacteria {
     }
 
     pub fn is_starving(&self) -> bool {
-        self.age > STARVATION_AGE && self.recent_diversity() < 0.05
+        self.energy <= 0.0 || (self.age > STARVATION_AGE && self.recent_diversity() < 0.05)
+    }
+
+    pub fn hunger(&self) -> f32 {
+        (1.0 - self.energy / MAX_BACTERIA_ENERGY).clamp(0.0, 1.0)
     }
 
     pub fn step(&mut self, memory: &[u8], quorum: &[f32], food: &[f32], crowding: &[u8]) -> (usize, u8, f32) {
@@ -211,12 +217,21 @@ impl Bacteria {
                              else                      { 0.3   };
         let recency_penalty = recency_weight * recency;
 
-        let food_val   = food[new_pos].max(0.0);
-        let food_bonus = (food_val / (FOOD_SIGNAL_THR + food_val)) * 1.5;
+        // Hambre: gana energía en celda con comida, pierde por metabolismo
+        let food_val = food[new_pos].max(0.0);
+        if food_val > FOOD_SIGNAL_THR {
+            self.energy = (self.energy + FOOD_ENERGY_GAIN).min(MAX_BACTERIA_ENERGY);
+        } else {
+            self.energy = (self.energy - METABOLISM_RATE).max(0.0);
+        }
+        let h = self.hunger();  // 0.0 = llena, 1.0 = hambrienta
 
-        // Penaliza estar en celdas superpobladas (evita el atractor de convergencia)
+        // Comida vale más cuanto más hambrienta está
+        let food_bonus = (food_val / (FOOD_SIGNAL_THR + food_val)) * (1.5 + h * 2.5);
+
+        // Crowding más costoso cuanto más hambrienta (compiten por recursos escasos)
         let crowd = crowding[new_pos] as f32;
-        let crowding_penalty = ((crowd - 1.0).max(0.0) / 8.0).min(1.0) * 1.5;
+        let crowding_penalty = ((crowd - 1.0).max(0.0) / 4.0).min(1.0) * (2.0 + h * 2.0);
 
         let reward = if new_pos == self.position { -0.8 }
                      else { novelty + 0.1 * memory_diff - recency_penalty + colony_bonus + food_bonus - crowding_penalty };
@@ -284,5 +299,6 @@ pub fn crossover(a: &Bacteria, b: &Bacteria, rng: &mut XorShift32) -> Bacteria {
         age:         0,
         cooldown:    COOLDOWN,
         rng:         XorShift32::new(rng.next_u32()),
+        energy:      (a.energy + b.energy) * 0.4,  // hereda 40% del promedio parental
     }
 }

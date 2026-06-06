@@ -96,6 +96,7 @@ pub async fn bacteria_loop(
                     age:         bacteria.age,
                     cooldown:    bacteria.cooldown,
                     rng:         crate::bacteria::XorShift32::new(bacteria.rng.state),
+                    energy:      bacteria.energy,
                 });
                 let _ = reply_tx.send(snapshot);
             }

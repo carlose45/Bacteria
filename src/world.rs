@@ -28,6 +28,11 @@ pub const FOOD_SIGNAL_THR: f32   = 3.0;
 pub const FOOD_DECAY:      f32   = 0.990;
 pub const FOOD_FLEE_THRESH:f32   = 100.0;
 
+// Hambre de bacterias
+pub const MAX_BACTERIA_ENERGY: f32 = 100.0;
+pub const METABOLISM_RATE:     f32 = 0.02;  // energía consumida por paso
+pub const FOOD_ENERGY_GAIN:    f32 = 3.0;   // energía ganada por paso en celda con comida
+
 // Snapshot inmutable del tablero enviado a cada bacteria por tick
 #[derive(Clone)]
 pub struct WorldState {
