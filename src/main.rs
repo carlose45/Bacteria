@@ -3,10 +3,12 @@ use std::fs::File;
 use std::io::Write;
 
 const MAX_POP:        usize = 12;
-const MAX_AGE:        u32   = 80_000; // edad máxima — garantiza recambio generacional
-const REPRODUCE_PROB: u32   = 30;   // % de probabilidad al encontrarse
-const COOLDOWN:       u32   = 2000; // pasos antes de poder reproducirse
-const STARVATION_AGE: u32   = 5000; // edad mínima para morir de inanición
+const MAX_AGE:        u32   = 80_000;
+const REPRODUCE_PROB: u32   = 30;
+const COOLDOWN:       u32   = 2000;
+const STARVATION_AGE: u32   = 5000;
+const QUORUM_DECAY:   f32   = 0.995; // semivida ~138 pasos ≈ 10ms por bacteria
+const QUORUM_THRESH:  f32   = 5.0;   // umbral mínimo para considerar zona de colonia
 
 // ── XorShift32 ───────────────────────────────────────────────────────────────
 
@@ -162,8 +164,6 @@ impl Bacteria {
         self.rewards.iter().sum::<f32>() / self.rewards.len() as f32
     }
 
-    // Diversidad reciente: posiciones únicas en el buffer / longitud del buffer
-    // Independiente de la edad — mide qué tan bien explora AHORA
     fn recent_diversity(&self) -> f32 {
         if self.recent.is_empty() { return 0.0; }
         let mut seen = [false; 1000];
@@ -171,14 +171,14 @@ impl Bacteria {
         seen.iter().filter(|&&b| b).count() as f32 / self.recent.len() as f32
     }
 
-    // Cobertura acumulada (solo para display — satura al 100% con la edad)
     fn coverage(&self) -> f32 {
         let covered = self.visits[..256].iter().filter(|&&v| v > 1.0).count();
         covered as f32 / 256.0
     }
 
     // Devuelve (nueva_posicion, valor_a_escribir, reward)
-    fn step(&mut self, memory: &[u8], rng: &mut XorShift32) -> (usize, u8, f32) {
+    // quorum: señal social acumulada por todas las bacterias en cada posición
+    fn step(&mut self, memory: &[u8], quorum: &[f32], rng: &mut XorShift32) -> (usize, u8, f32) {
         let value_read = memory[self.position];
         let prev_state = self.state;
         let (bits, logits) = self.transformer.forward(value_read, self.position, &prev_state, rng, 0.20);
@@ -194,10 +194,15 @@ impl Bacteria {
         let memory_diff = ((memory[new_pos] as i32 - memory[self.position] as i32).abs() as f32) / 255.0;
         let recency     = self.recent.iter().filter(|&&p| p == new_pos).count() as f32;
 
+        // Quorum sensing: bonus por moverse hacia zonas con presencia de colonia.
+        // El transformer aprende a correlacionar memory[pos] alto con este bonus.
+        let q = quorum[new_pos];
+        let colony_bonus = (q / (QUORUM_THRESH + q)) * 0.4;
+
         let reward = if new_pos == self.position {
             -0.8
         } else {
-            novelty + 0.1 * memory_diff - 0.3 * recency
+            novelty + 0.1 * memory_diff - 0.3 * recency + colony_bonus
         };
 
         self.transformer.learn(value_read, self.position, &prev_state, &logits, reward);
@@ -213,10 +218,9 @@ impl Bacteria {
         self.age += 1;
         if self.cooldown > 0 { self.cooldown -= 1; }
 
-        // Estigmergía: escribe densidad de exploración propia en la memoria compartida.
-        // Otras bacterias leen este valor y el transformer aprende a interpretar
-        // valores bajos = "zona inexplorada, ve aquí" / altos = "zona saturada, evita".
-        let store = (self.visits[new_pos] * 6.5).min(255.0) as u8;
+        // Escribe el quorum actual en la memoria compartida.
+        // Próximas bacterias que lean esta posición reciben la señal social.
+        let store = (q * 20.0).min(255.0) as u8;
         (new_pos, store, reward)
     }
 
@@ -230,7 +234,7 @@ impl Bacteria {
 fn crossover(a: &Bacteria, b: &Bacteria, rng: &mut XorShift32) -> Bacteria {
     let fa = a.recent_diversity().max(0.01);
     let fb = b.recent_diversity().max(0.01);
-    let pa = (fa / (fa + fb) * 100.0) as u32; // probabilidad de heredar de A
+    let pa = (fa / (fa + fb) * 100.0) as u32;
 
     macro_rules! cross8x8 {
         ($field:ident) => {
@@ -280,22 +284,42 @@ fn combined_visits(population: &[Bacteria]) -> [f32; 256] {
     cv
 }
 
-fn cell(pos: usize, population: &[Bacteria], cv: &[f32; 256]) -> String {
+fn colony_zones(quorum: &[f32]) -> usize {
+    quorum.iter().filter(|&&q| q > QUORUM_THRESH).count()
+}
+
+fn cell_terminal(pos: usize, population: &[Bacteria], cv: &[f32; 256], quorum: &[f32]) -> String {
     if let Some((idx, _)) = population.iter().enumerate().find(|(_, b)| b.position == pos) {
         format!("\x1B[1;92m{:X}\x1B[0m  ", idx)
+    } else if quorum[pos] > 8.0 {
+        "\x1B[1;35m@\x1B[0m  ".into()  // magenta: núcleo de colonia
+    } else if quorum[pos] > QUORUM_THRESH {
+        "\x1B[1;36m*\x1B[0m  ".into()  // cyan: zona de colonia
+    } else if cv[pos] > 100.0 {
+        "\x1B[1;33m+\x1B[0m  ".into()
+    } else if cv[pos] > 20.0 {
+        "\x1B[37m.\x1B[0m  ".into()
     } else {
-        let v = cv[pos];
-        if      v > 500.0 { "\x1B[1;31m#\x1B[0m  ".into() }
-        else if v > 100.0 { "\x1B[1;33m+\x1B[0m  ".into() }
-        else if v > 20.0  { "\x1B[37m.\x1B[0m  ".into()   }
-        else              { "   ".into()                    }
+        "   ".into()
     }
 }
 
-fn print_map(population: &[Bacteria], step: u32) {
+fn cell_snapshot(pos: usize, population: &[Bacteria], cv: &[f32; 256], quorum: &[f32]) -> &'static str {
+    if population.iter().any(|b| b.position == pos) { return "B  "; }
+    if quorum[pos] > 8.0        { return "@  "; }
+    if quorum[pos] > QUORUM_THRESH { return "*  "; }
+    if cv[pos] > 100.0          { return "+  "; }
+    if cv[pos] > 20.0           { return ".  "; }
+    "   "
+}
+
+fn print_map(population: &[Bacteria], quorum: &[f32], step: u32) {
     let cv = combined_visits(population);
+    let zones = colony_zones(quorum);
+    let q_max = quorum.iter().cloned().fold(0f32, f32::max);
     print!("\x1B[2J\x1B[H");
-    println!("  paso={:>9}  pop={}", step, population.len());
+    println!("  paso={:>9}  pop={}  colonias={}  q_max={:.1}",
+        step, population.len(), zones, q_max);
     for (i, b) in population.iter().enumerate() {
         println!("  B{:X}  pos={:>3}  div={:>3.0}%  cov={:>3.0}%  fit={:+.3}  age={}{}",
             i, b.position, b.recent_diversity() * 100.0, b.coverage() * 100.0,
@@ -308,18 +332,26 @@ fn print_map(population: &[Bacteria], step: u32) {
     println!();
     for row in 0..16 {
         print!(" {:X}   ", row);
-        for col in 0..16 { print!("{}", cell(row * 16 + col, population, &cv)); }
+        for col in 0..16 {
+            print!("{}", cell_terminal(row * 16 + col, population, &cv, quorum));
+        }
         println!();
     }
-    println!("\n  0-9 bacteria  # caliente  + tibio  . frío");
+    println!("\n  0-F bacteria  @ núcleo  * colonia  + tibio  . frío");
 }
 
-fn save_snapshot(population: &[Bacteria], step: u32, index: usize) {
+fn save_snapshot(population: &[Bacteria], quorum: &[f32], step: u32, index: usize) {
     let cv = combined_visits(population);
+    let zones = colony_zones(quorum);
+    let q_max = quorum.iter().cloned().fold(0f32, f32::max);
     if let Ok(mut f) = File::create(format!("snapshot_{:02}.txt", index)) {
-        let _ = writeln!(f, "Snap {:02} | paso={} | pop={}", index, step, population.len());
+        let _ = writeln!(f, "Snap {:02} | paso={} | pop={} | colonias={} | q_max={:.1}",
+            index, step, population.len(), zones, q_max);
         for (i, b) in population.iter().enumerate() {
-            let _ = writeln!(f, "  B{:X}  pos={:>3}  div={:>3.0}%  cov={:>3.0}%  fit={:+.3}  age={}", i, b.position, b.recent_diversity()*100.0, b.coverage()*100.0, b.fitness(), b.age);
+            let _ = writeln!(f,
+                "  B{:X}  pos={:>3}  div={:>3.0}%  cov={:>3.0}%  fit={:+.3}  age={}",
+                i, b.position, b.recent_diversity()*100.0,
+                b.coverage()*100.0, b.fitness(), b.age);
         }
         let _ = writeln!(f);
         let mut header = String::from("      ");
@@ -329,14 +361,12 @@ fn save_snapshot(population: &[Bacteria], step: u32, index: usize) {
             let mut line = format!(" {:X}   ", row);
             for col in 0..16 {
                 let pos = row * 16 + col;
-                if let Some((idx, _)) = population.iter().enumerate().find(|(_, b)| b.position == pos) {
+                if let Some((idx, _)) = population.iter().enumerate()
+                    .find(|(_, b)| b.position == pos)
+                {
                     line.push_str(&format!("{:X}  ", idx));
                 } else {
-                    let v = cv[pos];
-                    if      v > 500.0 { line.push_str("#  "); }
-                    else if v > 100.0 { line.push_str("+  "); }
-                    else if v > 20.0  { line.push_str(".  "); }
-                    else              { line.push_str("   "); }
+                    line.push_str(cell_snapshot(pos, population, &cv, quorum));
                 }
             }
             let _ = writeln!(f, "{}", line);
@@ -358,6 +388,7 @@ fn main() {
     let mut rng = XorShift32::new(seed);
 
     let mut memory: Vec<u8> = (0..1000).map(|i| ((i * 37 + 13) % 256) as u8).collect();
+    let mut quorum: Vec<f32> = vec![0.0; 256]; // señal social acumulada por posición
     let mut population: Vec<Bacteria> = {
         let positions = [0usize, 64, 128, 192];
         positions.iter().map(|&pos| {
@@ -368,16 +399,19 @@ fn main() {
     };
     let mut history: VecDeque<String> = VecDeque::with_capacity(100);
     let mut last_snapshot = std::time::Instant::now();
-    let mut last_print   = std::time::Instant::now();
+    let mut last_print    = std::time::Instant::now();
     let mut snapshot_count = 0usize;
     let mut step = 0u32;
 
     loop {
-        // Paso de cada bacteria
+        // Paso de cada bacteria — acumula quorum en posición visitada
         for b in &mut population {
-            let (new_pos, store, _) = b.step(&memory, &mut rng);
+            let (new_pos, store, _) = b.step(&memory, &quorum, &mut rng);
             memory[new_pos] = store;
+            quorum[new_pos] += 1.0;
         }
+        // Decay del campo de quorum (feromona que se evapora)
+        for q in quorum.iter_mut() { *q *= QUORUM_DECAY; }
 
         // Detección de encuentros y reproducción
         let mut offspring: Vec<Bacteria> = vec![];
@@ -394,7 +428,6 @@ fn main() {
         }
         for child in offspring {
             if population.len() >= MAX_POP {
-                // Mata al de menor diversidad reciente (independiente de la edad)
                 let idx = population.iter().enumerate()
                     .min_by(|a, b| a.1.recent_diversity().partial_cmp(&b.1.recent_diversity()).unwrap())
                     .map(|(i, _)| i).unwrap();
@@ -403,7 +436,7 @@ fn main() {
             population.push(child);
         }
 
-        // Muerte por vejez o inanición (mínimo 1 bacteria viva)
+        // Muerte por vejez o inanición
         if population.len() > 1 {
             population.retain(|b| b.age <= MAX_AGE && !b.is_starving());
         }
@@ -414,20 +447,24 @@ fn main() {
             let divs = population.iter()
                 .map(|b| format!("{:.0}%", b.recent_diversity()*100.0))
                 .collect::<Vec<_>>().join(" ");
-            history.push_back(format!("paso={:>9}  pop={}  div=[{}]", step, population.len(), divs));
+            let zones = colony_zones(&quorum);
+            history.push_back(format!(
+                "paso={:>9}  pop={}  col={}  div=[{}]",
+                step, population.len(), zones, divs
+            ));
             if history.len() > 100 { history.pop_front(); }
         }
 
-        // Mapa en terminal (máximo 2 veces/segundo — evita saturar el buffer del terminal)
+        // Mapa en terminal (máximo 2 veces/segundo)
         if last_print.elapsed().as_millis() >= 500 {
-            print_map(&population, step);
+            print_map(&population, &quorum, step);
             last_print = std::time::Instant::now();
         }
 
         // Snapshot cada 60 segundos, máximo 10
         if snapshot_count < 10 && last_snapshot.elapsed().as_secs() >= 60 {
             snapshot_count += 1;
-            save_snapshot(&population, step, snapshot_count);
+            save_snapshot(&population, &quorum, step, snapshot_count);
             save_history(&history);
             last_snapshot = std::time::Instant::now();
         }
