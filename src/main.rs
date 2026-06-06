@@ -7,8 +7,11 @@ const MAX_AGE:        u32   = 80_000;
 const REPRODUCE_PROB: u32   = 30;
 const COOLDOWN:       u32   = 2000;
 const STARVATION_AGE: u32   = 5000;
-const QUORUM_DECAY:   f32   = 0.985; // semivida ~46 pasos — E[Q_random]=3.1 < umbral, cluster→Q≫5
-const QUORUM_THRESH:  f32   = 5.0;   // umbral: 2+ bacterias concentradas lo superan, ruido no
+const QUORUM_DECAY:        f32   = 0.985; // semivida ~46 pasos — E[Q_random]=3.1 < umbral
+const QUORUM_THRESH:       f32   = 5.0;   // umbral colonia: cluster de 2+ bacterias lo supera
+const QUORUM_EVENT_THRESH: f32   = 8.0;   // dispara snapshot de evento al superar este valor
+const MAX_SNAPS:           usize = 30;    // máximo de snapshots totales
+const SNAP_INTERVAL_SECS:  u64   = 15;   // snapshot periódico cada 15 segundos
 
 // ── XorShift32 ───────────────────────────────────────────────────────────────
 
@@ -340,13 +343,13 @@ fn print_map(population: &[Bacteria], quorum: &[f32], step: u32) {
     println!("\n  0-F bacteria  @ núcleo  * colonia  + tibio  . frío");
 }
 
-fn save_snapshot(population: &[Bacteria], quorum: &[f32], step: u32, index: usize) {
+fn save_snapshot(population: &[Bacteria], quorum: &[f32], step: u32, index: usize, trigger: &str) {
     let cv = combined_visits(population);
     let zones = colony_zones(quorum);
     let q_max = quorum.iter().cloned().fold(0f32, f32::max);
     if let Ok(mut f) = File::create(format!("snapshot_{:02}.txt", index)) {
-        let _ = writeln!(f, "Snap {:02} | paso={} | pop={} | colonias={} | q_max={:.1}",
-            index, step, population.len(), zones, q_max);
+        let _ = writeln!(f, "Snap {:02} | {} | paso={} | pop={} | colonias={} | q_max={:.1}",
+            index, trigger, step, population.len(), zones, q_max);
         for (i, b) in population.iter().enumerate() {
             let _ = writeln!(f,
                 "  B{:X}  pos={:>3}  div={:>3.0}%  cov={:>3.0}%  fit={:+.3}  age={}",
@@ -398,9 +401,11 @@ fn main() {
         }).collect()
     };
     let mut history: VecDeque<String> = VecDeque::with_capacity(100);
-    let mut last_snapshot = std::time::Instant::now();
-    let mut last_print    = std::time::Instant::now();
+    let mut last_snapshot  = std::time::Instant::now();
+    let mut last_print     = std::time::Instant::now();
+    let mut last_event_snap = std::time::Instant::now();
     let mut snapshot_count = 0usize;
+    let mut q_prev_above   = false; // estado anterior del quorum vs. umbral de evento
     let mut step = 0u32;
 
     loop {
@@ -442,15 +447,16 @@ fn main() {
         }
         if population.is_empty() { population.push(Bacteria::new(&mut rng)); }
 
-        // Historial (cada 100 pasos)
-        if step % 100 == 0 {
-            let divs = population.iter()
+        // Historial cada 10 pasos — resolución suficiente para ver dinámica del quorum
+        if step % 10 == 0 {
+            let q_now = quorum.iter().cloned().fold(0f32, f32::max);
+            let zones  = colony_zones(&quorum);
+            let divs   = population.iter()
                 .map(|b| format!("{:.0}%", b.recent_diversity()*100.0))
                 .collect::<Vec<_>>().join(" ");
-            let zones = colony_zones(&quorum);
             history.push_back(format!(
-                "paso={:>9}  pop={}  col={}  div=[{}]",
-                step, population.len(), zones, divs
+                "paso={:>9}  pop={}  col={}  q={:.1}  div=[{}]",
+                step, population.len(), zones, q_now, divs
             ));
             if history.len() > 100 { history.pop_front(); }
         }
@@ -461,10 +467,24 @@ fn main() {
             last_print = std::time::Instant::now();
         }
 
-        // Snapshot cada 60 segundos, máximo 10
-        if snapshot_count < 10 && last_snapshot.elapsed().as_secs() >= 60 {
+        // Snapshot de EVENTO: primera vez que q_max sube sobre el umbral de evento
+        let q_now    = quorum.iter().cloned().fold(0f32, f32::max);
+        let q_above  = q_now > QUORUM_EVENT_THRESH;
+        if q_above && !q_prev_above
+            && snapshot_count < MAX_SNAPS
+            && last_event_snap.elapsed().as_secs() >= 5
+        {
             snapshot_count += 1;
-            save_snapshot(&population, &quorum, step, snapshot_count);
+            save_snapshot(&population, &quorum, step, snapshot_count, "EVENTO");
+            save_history(&history);
+            last_event_snap = std::time::Instant::now();
+        }
+        q_prev_above = q_above;
+
+        // Snapshot periódico cada SNAP_INTERVAL_SECS segundos
+        if snapshot_count < MAX_SNAPS && last_snapshot.elapsed().as_secs() >= SNAP_INTERVAL_SECS {
+            snapshot_count += 1;
+            save_snapshot(&population, &quorum, step, snapshot_count, "TIME");
             save_history(&history);
             last_snapshot = std::time::Instant::now();
         }
