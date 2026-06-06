@@ -444,13 +444,20 @@ fn main() {
     let mut step = 0u32;
 
     loop {
-        // Fase 1 — paralela: cada bacteria lee snapshot y computa en su hilo
+        // Fase 1 — paralela cuando la población es grande, secuencial si no
         let mem_snap = memory.clone();
         let qm_snap  = quorum.clone();
-        let updates: Vec<(usize, u8)> = population
-            .par_iter_mut()
-            .map(|b| { let (p, s, _) = b.step(&mem_snap, &qm_snap); (p, s) })
-            .collect();
+        let updates: Vec<(usize, u8)> = if population.len() >= 48 {
+            population
+                .par_iter_mut()
+                .map(|b| { let (p, s, _) = b.step(&mem_snap, &qm_snap); (p, s) })
+                .collect()
+        } else {
+            population
+                .iter_mut()
+                .map(|b| { let (p, s, _) = b.step(&mem_snap, &qm_snap); (p, s) })
+                .collect()
+        };
 
         // Fase 2 — secuencial: aplica writes al estado compartido
         for &(new_pos, store) in &updates {
