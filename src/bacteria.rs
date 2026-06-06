@@ -162,7 +162,7 @@ impl Bacteria {
             age:         0,
             cooldown:    0,
             rng:         XorShift32::new(rng.next_u32()),
-            energy:      MAX_BACTERIA_ENERGY * 0.5,
+            energy:      MAX_BACTERIA_ENERGY,  // nace con energía completa
         }
     }
 
@@ -226,12 +226,14 @@ impl Bacteria {
         }
         let h = self.hunger();  // 0.0 = llena, 1.0 = hambrienta
 
-        // Comida vale más cuanto más hambrienta está
-        let food_bonus = (food_val / (FOOD_SIGNAL_THR + food_val)) * (1.5 + h * 2.5);
+        // Comida vale más cuanto más hambrienta (urgencia de supervivencia)
+        let food_bonus = (food_val / (FOOD_SIGNAL_THR + food_val)) * (1.5 + h * 3.0);
 
-        // Crowding más costoso cuanto más hambrienta (compiten por recursos escasos)
+        // Crowding: penalización fuerte cuando está llena (explorar), débil cuando hambrienta
+        // (desesperada acepta competir por comida antes que morir)
         let crowd = crowding[new_pos] as f32;
-        let crowding_penalty = ((crowd - 1.0).max(0.0) / 4.0).min(1.0) * (2.0 + h * 2.0);
+        let crowd_tolerance = 1.0 - h * 0.7;  // 1.0 llena → 0.3 hambrienta
+        let crowding_penalty = ((crowd - 1.0).max(0.0) / 4.0).min(1.0) * 2.5 * crowd_tolerance;
 
         let reward = if new_pos == self.position { -0.8 }
                      else { novelty + 0.1 * memory_diff - recency_penalty + colony_bonus + food_bonus - crowding_penalty };
