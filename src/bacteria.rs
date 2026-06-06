@@ -184,7 +184,7 @@ impl Bacteria {
         self.age > STARVATION_AGE && self.recent_diversity() < 0.05
     }
 
-    pub fn step(&mut self, memory: &[u8], quorum: &[f32], food: &[f32]) -> (usize, u8, f32) {
+    pub fn step(&mut self, memory: &[u8], quorum: &[f32], food: &[f32], crowding: &[u8]) -> (usize, u8, f32) {
         let value_read = memory[self.position];
         let prev_state = self.state;
         let q_grad     = quorum_neighborhood(self.position, quorum);
@@ -214,8 +214,12 @@ impl Bacteria {
         let food_val   = food[new_pos].max(0.0);
         let food_bonus = (food_val / (FOOD_SIGNAL_THR + food_val)) * 1.5;
 
+        // Penaliza estar en celdas superpobladas (evita el atractor de convergencia)
+        let crowd = crowding[new_pos] as f32;
+        let crowding_penalty = ((crowd - 1.0).max(0.0) / 8.0).min(1.0) * 1.5;
+
         let reward = if new_pos == self.position { -0.8 }
-                     else { novelty + 0.1 * memory_diff - recency_penalty + colony_bonus + food_bonus };
+                     else { novelty + 0.1 * memory_diff - recency_penalty + colony_bonus + food_bonus - crowding_penalty };
 
         self.transformer.learn(value_read, self.position, &prev_state, &q_grad, &logits, reward);
 

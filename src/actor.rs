@@ -50,7 +50,7 @@ pub async fn bacteria_loop(
 
                 // CPU-bound: step del transformer (síncrono dentro de la task async)
                 let (new_pos, store, reward) = bacteria.step(
-                    &snap.memory, &snap.quorum, &snap.food,
+                    &snap.memory, &snap.quorum, &snap.food, &snap.crowding,
                 );
 
                 let should_die = bacteria.age > crate::world::MAX_AGE

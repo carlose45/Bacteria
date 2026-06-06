@@ -81,7 +81,12 @@ pub async fn board_loop(mut rng: XorShift32) {
             }
         }
 
-        // 3. Aplicar movimientos al tablero
+        // 3. Actualizar crowding y aplicar movimientos al tablero
+        world.crowding.iter_mut().for_each(|c| *c = 0);
+        for r in &results {
+            world.crowding[r.new_pos] = world.crowding[r.new_pos].saturating_add(1);
+        }
+
         for r in &results {
             world.memory[r.new_pos] = r.store;
             let fv          = snap.food[r.new_pos];

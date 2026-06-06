@@ -31,17 +31,19 @@ pub const FOOD_FLEE_THRESH:f32   = 100.0;
 // Snapshot inmutable del tablero enviado a cada bacteria por tick
 #[derive(Clone)]
 pub struct WorldState {
-    pub memory: Vec<u8>,
-    pub quorum: Vec<f32>,
-    pub food:   Vec<f32>,
+    pub memory:   Vec<u8>,
+    pub quorum:   Vec<f32>,
+    pub food:     Vec<f32>,
+    pub crowding: Vec<u8>,   // bacterias por celda el tick anterior
 }
 
 impl WorldState {
     pub fn new() -> Self {
         Self {
-            memory: (0..GRID_SIZE).map(|i| ((i * 37 + 13) % 256) as u8).collect(),
-            quorum: vec![0.0; GRID_SIZE],
-            food:   vec![0.0; GRID_SIZE],
+            memory:   (0..GRID_SIZE).map(|i| ((i * 37 + 13) % 256) as u8).collect(),
+            quorum:   vec![0.0; GRID_SIZE],
+            food:     vec![0.0; GRID_SIZE],
+            crowding: vec![0u8; GRID_SIZE],
         }
     }
 }
