@@ -133,7 +133,8 @@ pub async fn board_loop(mut rng: XorShift32) {
                 let nbrs      = cardinal_neighbors(fa.position);
                 let child_pos = nbrs[rng.next_u32() as usize % 4];
                 new_food.push(FoodAgent { position: child_pos, energy: fa.energy,
-                                          age: 0, recent: VecDeque::with_capacity(200) });
+                                          age: 0, recent: VecDeque::with_capacity(200),
+                                          rng: crate::bacteria::XorShift32::new(rng.next_u32()) });
             }
         }
         food_agents.extend(new_food);

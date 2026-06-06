@@ -12,7 +12,7 @@ pub const STARVATION_AGE: u32   = 5_000;
 
 pub const QUORUM_DECAY:        f32 = 0.985;
 pub const QUORUM_THRESH:       f32 = 5.0;
-pub const QUORUM_SAT_THRESH:   f32 = 180.0;
+pub const QUORUM_SAT_THRESH:   f32 = 40.0;
 pub const QUORUM_EVENT_THRESH: f32 = 8.0;
 pub const QUORUM_DEPOSIT:      f32 = 12.0 / MAX_POP as f32;
 
@@ -26,7 +26,7 @@ pub const FOOD_EATEN:      f32   = 15.0 * 12.0 / MAX_POP as f32;
 pub const FOOD_SIGNAL:     f32   = 4.0;
 pub const FOOD_SIGNAL_THR: f32   = 3.0;
 pub const FOOD_DECAY:      f32   = 0.990;
-pub const FOOD_FLEE_THRESH:f32   = 100.0;
+pub const FOOD_FLEE_THRESH:f32   = 60.0;
 
 // Hambre de bacterias
 pub const MAX_BACTERIA_ENERGY: f32 = 100.0;
