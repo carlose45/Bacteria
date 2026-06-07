@@ -18,7 +18,13 @@ pub struct StepResult {
     pub coverage:   f32,
     pub age:        u32,
     pub cooldown:   u32,
-    pub should_die: bool,
+    pub should_die:  bool,
+    pub hunger:      f32,
+    pub metabolism:  f32,
+    pub curiosity:   f32,
+    pub sociability: f32,
+    pub selectivity: f32,
+    pub altruism:    f32,
     // Visitas acumuladas para el mapa de calor (solo las > umbral)
     pub hot_cells:  Vec<(usize, f32)>,
 }
@@ -50,7 +56,7 @@ pub async fn bacteria_loop(
 
                 // CPU-bound: step del transformer (síncrono dentro de la task async)
                 let (new_pos, store, reward) = bacteria.step(
-                    &snap.memory, &snap.quorum, &snap.food, &snap.crowding,
+                    &snap.memory, &snap.quorum, &snap.food, &snap.crowding, &snap.stigma,
                 );
 
                 let should_die = bacteria.age > crate::world::MAX_AGE
@@ -74,6 +80,12 @@ pub async fn bacteria_loop(
                     age:        bacteria.age,
                     cooldown:   bacteria.cooldown,
                     should_die,
+                    hunger:      bacteria.hunger(),
+                    metabolism:  bacteria.metabolism,
+                    curiosity:   bacteria.curiosity,
+                    sociability: bacteria.sociability,
+                    selectivity: bacteria.selectivity,
+                    altruism:    bacteria.altruism,
                     hot_cells,
                 });
 
@@ -88,8 +100,7 @@ pub async fn bacteria_loop(
                 // seguimos siendo nosotros — solo compartimos los pesos
                 let snapshot = Box::new(Bacteria {
                     position:    bacteria.position,
-                    state:       bacteria.state,
-                    transformer: bacteria.transformer.clone(),
+                    ctrnn:       bacteria.ctrnn.clone(),
                     visits:      Box::new([0.0; crate::world::GRID_SIZE]),
                     recent:      bacteria.recent.clone(),
                     rewards:     bacteria.rewards.clone(),
@@ -97,6 +108,11 @@ pub async fn bacteria_loop(
                     cooldown:    bacteria.cooldown,
                     rng:         crate::bacteria::XorShift32::new(bacteria.rng.state),
                     energy:      bacteria.energy,
+                    metabolism:  bacteria.metabolism,
+                    curiosity:   bacteria.curiosity,
+                    sociability: bacteria.sociability,
+                    selectivity: bacteria.selectivity,
+                    altruism:    bacteria.altruism,
                 });
                 let _ = reply_tx.send(snapshot);
             }

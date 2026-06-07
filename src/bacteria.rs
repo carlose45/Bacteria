@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use crate::world::*;
+use crate::ctrnn::{Ctrnn, crossover_ctrnn};
 
 // ── RNG ───────────────────────────────────────────────────────────────────────
 
@@ -17,152 +18,48 @@ impl XorShift32 {
     }
 }
 
-// ── MiniTransformer ───────────────────────────────────────────────────────────
-
-#[derive(Clone)]
-pub struct MiniTransformer {
-    pub embedding_matrix: [[f32; DIM]; 256],
-    pub attention_w_q:    [[f32; DIM]; DIM],
-    pub attention_w_k:    [[f32; DIM]; DIM],
-    pub attention_w_v:    [[f32; DIM]; DIM],
-    pub ff_w1:            [[f32; DIM]; 16],
-    pub ff_w2:            [[f32; 16]; DIM],
-    pub learning_rate:    f32,
-}
-
-impl MiniTransformer {
-    pub fn new(rng: &mut XorShift32) -> Self {
-        let mut emb = [[0f32; DIM]; 256];
-        let mut wq  = [[0f32; DIM]; DIM];
-        let mut wk  = [[0f32; DIM]; DIM];
-        let mut wv  = [[0f32; DIM]; DIM];
-        let mut ff1 = [[0f32; DIM]; 16];
-        let mut ff2 = [[0f32; 16]; DIM];
-        for r in emb.iter_mut() { for x in r.iter_mut() { *x = Self::rand(rng); } }
-        for r in wq.iter_mut()  { for x in r.iter_mut() { *x = Self::rand(rng); } }
-        for r in wk.iter_mut()  { for x in r.iter_mut() { *x = Self::rand(rng); } }
-        for r in wv.iter_mut()  { for x in r.iter_mut() { *x = Self::rand(rng); } }
-        for r in ff1.iter_mut() { for x in r.iter_mut() { *x = Self::rand(rng); } }
-        for r in ff2.iter_mut() { for x in r.iter_mut() { *x = Self::rand(rng); } }
-        Self { embedding_matrix: emb, attention_w_q: wq, attention_w_k: wk,
-               attention_w_v: wv, ff_w1: ff1, ff_w2: ff2, learning_rate: 0.001 }
-    }
-
-    fn rand(rng: &mut XorShift32) -> f32 {
-        (rng.next_u32() as f32 / 4294967296.0 - 0.5) * 1.0
-    }
-
-    pub fn forward(&self, value: u8, position: usize, state: &[f32; DIM],
-                   q_grad: &[f32; 8], rng: &mut XorShift32, epsilon: f32,
-    ) -> ([u8; DIM], [f32; DIM]) {
-        let ve = self.embedding_matrix[value as usize];
-        let pe = self.embedding_matrix[position % 256];
-        let mut emb = [0f32; DIM];
-        for i in 0..8 { emb[i] = ve[i] + pe[i] + state[i] * 0.1 + q_grad[i] * 0.5; }
-        emb[8] = ve[8] + pe[8] + state[8] * 0.1;
-        emb[9] = ve[9] + pe[9] + state[9] * 0.1;
-        let attended = self.multihead_attention(&emb, state);
-        let logits   = self.feedforward(&attended);
-        let mut bits = [0u8; DIM];
-        let explore  = (rng.next_u32() as f32 / 4294967296.0) < epsilon;
-        for i in 0..DIM {
-            bits[i] = if explore {
-                (rng.next_u32() & 1) as u8
-            } else {
-                let noise = (rng.next_u32() as f32 / 4294967296.0 - 0.5) * 0.2;
-                if logits[i] + noise > 0.0 { 1 } else { 0 }
-            };
-        }
-        (bits, logits)
-    }
-
-    pub fn learn(&mut self, value: u8, position: usize, state: &[f32; DIM],
-                 q_grad: &[f32; 8], logits: &[f32; DIM], reward: f32) {
-        let ve = self.embedding_matrix[value as usize];
-        let pe = self.embedding_matrix[position % 256];
-        let mut emb = [0f32; DIM];
-        for i in 0..8 { emb[i] = ve[i] + pe[i] + state[i] * 0.1 + q_grad[i] * 0.5; }
-        emb[8] = ve[8] + pe[8] + state[8] * 0.1;
-        emb[9] = ve[9] + pe[9] + state[9] * 0.1;
-        let attended = self.multihead_attention(&emb, state);
-        let hidden   = self.mm16(&self.ff_w1, &attended);
-        let activated: [f32; 16] = hidden.map(|x| x.tanh());
-        let lr = self.learning_rate;
-        for i in 0..DIM {
-            let d = if logits[i] > 0.0 { 1.0 } else { -1.0 };
-            for j in 0..16 { self.ff_w2[i][j] += lr * reward * d * activated[j]; }
-        }
-        for i in 0..16 {
-            let d = if hidden[i] > 0.0 { 1.0 } else { -1.0 };
-            for j in 0..DIM { self.ff_w1[i][j] += lr * reward * d * attended[j]; }
-        }
-    }
-
-    fn multihead_attention(&self, emb: &[f32; DIM], state: &[f32; DIM]) -> [f32; DIM] {
-        let q1 = self.mm_dim(&self.attention_w_q, emb);
-        let k1 = self.mm_dim(&self.attention_w_k, emb);
-        let v1 = self.mm_dim(&self.attention_w_v, emb);
-        let q2 = self.mm_dim(&self.attention_w_q, state);
-        let k2 = self.mm_dim(&self.attention_w_k, state);
-        let v2 = self.mm_dim(&self.attention_w_v, state);
-        let s1 = self.dot(&q1, &k1) * 0.1;
-        let s2 = self.dot(&q2, &k2) * 0.1;
-        let mut out = [0f32; DIM];
-        for i in 0..DIM { out[i] = (v1[i] * s1.tanh() + v2[i] * s2.tanh()) * 0.5; }
-        out
-    }
-
-    fn feedforward(&self, input: &[f32; DIM]) -> [f32; DIM] {
-        let hidden    = self.mm16(&self.ff_w1, input);
-        let activated: [f32; 16] = hidden.map(|x| x.tanh());
-        let mut out = [0f32; DIM];
-        for i in 0..DIM { for j in 0..16 { out[i] += self.ff_w2[i][j] * activated[j]; } }
-        out
-    }
-
-    fn mm_dim(&self, m: &[[f32; DIM]; DIM], v: &[f32; DIM]) -> [f32; DIM] {
-        let mut r = [0f32; DIM];
-        for i in 0..DIM { for j in 0..DIM { r[i] += m[i][j] * v[j]; } }
-        r
-    }
-    fn mm16(&self, m: &[[f32; DIM]; 16], v: &[f32; DIM]) -> [f32; 16] {
-        let mut r = [0f32; 16];
-        for i in 0..16 { for j in 0..DIM { r[i] += m[i][j] * v[j]; } }
-        r
-    }
-    fn dot(&self, a: &[f32; DIM], b: &[f32; DIM]) -> f32 {
-        a.iter().zip(b).map(|(x, y)| x * y).sum()
-    }
-}
-
 // ── Bacteria ──────────────────────────────────────────────────────────────────
 
 pub struct Bacteria {
     pub position:    usize,
-    pub state:       [f32; DIM],
-    pub transformer: MiniTransformer,
-    pub visits:      Box<[f32; GRID_SIZE]>,  // en heap para no saturar el stack
+    pub ctrnn:       Ctrnn,
+    pub visits:      Box<[f32; GRID_SIZE]>,
     pub recent:      VecDeque<usize>,
     pub rewards:     VecDeque<f32>,
     pub age:         u32,
     pub cooldown:    u32,
     pub rng:         XorShift32,
     pub energy:      f32,
+    pub metabolism:  f32,  // tasa de consumo energético individual
+    pub curiosity:   f32,  // multiplicador de recompensa por novedad    [0.2, 2.0]
+    pub sociability: f32,  // multiplicador de recompensa por colonia    [0.2, 2.0]
+    pub selectivity: f32,  // exigencia de fitness al elegir pareja      [0.0, 1.0]
+    pub altruism:    f32,  // multiplica quórum depositado + paga coste  [0.2, 2.0]
 }
 
 impl Bacteria {
     pub fn new(rng: &mut XorShift32) -> Self {
+        let rf = |r: &mut XorShift32| r.next_u32() as f32 / u32::MAX as f32;
+        let metabolism  = METABOLISM_RATE * (1.0 - METABOLISM_SPREAD + rf(rng) * METABOLISM_SPREAD * 2.0);
+        let curiosity   = 0.5 + rf(rng);          // [0.5, 1.5]
+        let sociability = 0.5 + rf(rng);          // [0.5, 1.5]
+        let selectivity = rf(rng);                 // [0.0, 1.0]
+        let altruism    = 0.5 + rf(rng);          // [0.5, 1.5]
         Self {
             position:    0,
-            state:       [0.0; DIM],
-            transformer: MiniTransformer::new(rng),
+            ctrnn:       Ctrnn::new(rng),
             visits:      Box::new([0.0; GRID_SIZE]),
             recent:      VecDeque::with_capacity(500),
             rewards:     VecDeque::with_capacity(200),
             age:         0,
             cooldown:    0,
             rng:         XorShift32::new(rng.next_u32()),
-            energy:      MAX_BACTERIA_ENERGY,  // nace con energía completa
+            energy:      MAX_BACTERIA_ENERGY,
+            metabolism,
+            curiosity,
+            sociability,
+            selectivity,
+            altruism,
         }
     }
 
@@ -190,24 +87,48 @@ impl Bacteria {
         (1.0 - self.energy / MAX_BACTERIA_ENERGY).clamp(0.0, 1.0)
     }
 
-    pub fn step(&mut self, memory: &[u8], quorum: &[f32], food: &[f32], crowding: &[u8]) -> (usize, u8, f32) {
-        let value_read = memory[self.position];
-        let prev_state = self.state;
-        let q_grad     = quorum_neighborhood(self.position, quorum);
-        let (bits, logits) = self.transformer.forward(
-            value_read, self.position, &prev_state, &q_grad, &mut self.rng, 0.20);
+    pub fn step(&mut self, memory: &[u8], quorum: &[f32], food: &[f32], crowding: &[u8], stigma: &[f32]) -> (usize, u8, f32) {
+        // ── Construir vector de sensores (N_SENS = 12) ────────────────────────
+        let q_grad   = quorum_neighborhood(self.position, quorum);
+        let food_cur = food[self.position].max(0.0);
+        let nbrs     = cardinal_neighbors(self.position);
+        // Gradiente de comida: ¿hay más comida en algún vecino cardinal?
+        let food_max_nbr = nbrs.iter().map(|&n| food[n].max(0.0)).fold(0.0f32, f32::max);
+        let food_gradient = (food_max_nbr - food_cur).max(0.0)
+                            / (FOOD_SIGNAL_THR + food_max_nbr + 1.0);
 
-        let new_pos = bits.iter().enumerate()
-            .fold(0usize, |acc, (i, &b)| acc + ((b as usize) << i))
-            % GRID_SIZE;
+        // Memoria colectiva: valor local y gradiente cardinal
+        let s_local   = stigma[self.position];
+        let s_max_nbr = nbrs.iter().map(|&n| stigma[n]).fold(s_local, f32::max);
 
-        for i in 0..DIM { self.state[i] = if bits[i] == 1 { 0.5 } else { -0.5 }; }
+        let sensors: [f32; N_SENS] = [
+            q_grad[0], q_grad[1], q_grad[2], q_grad[3],     // gradiente quórum
+            q_grad[4], q_grad[5], q_grad[6], q_grad[7],
+            food_cur / (FOOD_SIGNAL_THR + food_cur + 1.0),   // comida local
+            food_gradient,                                    // gradiente de comida cardinal
+            self.hunger(),                                    // urgencia de hambre
+            (crowding[self.position] as f32 / 8.0).min(1.0), // densidad local
+            s_local / (STIGMA_SAT + s_local + 1.0),          // memoria colectiva local
+            (s_max_nbr - s_local).max(0.0) / (STIGMA_SAT + 1.0), // gradiente hacia más memoria
+        ];
 
+        // ── CTRNN elige acción (0=quedar, 1=N, 2=S, 3=E, 4=W) ───────────────
+        let action  = self.ctrnn.step(&sensors, &mut self.rng);
+        let new_pos = match action {
+            1 => nbrs[0],
+            2 => nbrs[1],
+            3 => nbrs[2],
+            4 => nbrs[3],
+            _ => self.position,
+        };
+
+        // ── Métricas de exploración ───────────────────────────────────────────
         for v in self.visits.iter_mut() { *v *= 0.9990; }
         let novelty     = 1.0 / (1.0 + self.visits[new_pos]);
         let memory_diff = ((memory[new_pos] as i32 - memory[self.position] as i32).abs() as f32) / 255.0;
         let recency     = self.recent.iter().filter(|&&p| p == new_pos).count() as f32;
 
+        // ── Quórum y colonia ──────────────────────────────────────────────────
         let q     = quorum[new_pos];
         let q_eff = q.min(20.0);
         let colony_bonus = (q_eff / (QUORUM_THRESH + q_eff)) * 1.2;
@@ -217,33 +138,32 @@ impl Bacteria {
                              else                      { 0.3   };
         let recency_penalty = recency_weight * recency;
 
-        // Hambre: gana energía en celda con comida, pierde por metabolismo
+        // ── Hambre y comida ───────────────────────────────────────────────────
         let food_val = food[new_pos].max(0.0);
         if food_val > FOOD_SIGNAL_THR {
             self.energy = (self.energy + FOOD_ENERGY_GAIN).min(MAX_BACTERIA_ENERGY);
         } else {
-            self.energy = (self.energy - METABOLISM_RATE).max(0.0);
+            self.energy = (self.energy - self.metabolism - self.altruism * ALTRUISM_COST).max(0.0);
         }
-        let h = self.hunger();  // 0.0 = llena, 1.0 = hambrienta
+        let h = self.hunger();
 
-        // Comida vale más cuanto más hambrienta (urgencia de supervivencia)
         let food_bonus = (food_val / (FOOD_SIGNAL_THR + food_val)) * (1.5 + h * 3.0);
 
-        // Crowding: penalización fuerte cuando está llena (explorar), débil cuando hambrienta
-        // (desesperada acepta competir por comida antes que morir)
+        // ── Penalización de crowding (inversamente proporcional al hambre) ────
         let crowd = crowding[new_pos] as f32;
-        let crowd_tolerance = 1.0 - h * 0.7;  // 1.0 llena → 0.3 hambrienta
-        let crowding_penalty = ((crowd - 1.0).max(0.0) / 4.0).min(1.0) * 2.5 * crowd_tolerance;
+        let crowd_tolerance    = 1.0 - h * 0.7;
+        let crowding_penalty   = ((crowd - 1.0).max(0.0) / 4.0).min(1.0) * 2.5 * crowd_tolerance;
 
+        // ── Recompensa ────────────────────────────────────────────────────────
         let reward = if new_pos == self.position { -0.8 }
-                     else { novelty + 0.1 * memory_diff - recency_penalty + colony_bonus + food_bonus - crowding_penalty };
+                     else { novelty * self.curiosity + 0.1 * memory_diff - recency_penalty
+                            + colony_bonus * self.sociability + food_bonus - crowding_penalty };
 
-        self.transformer.learn(value_read, self.position, &prev_state, &q_grad, &logits, reward);
-
+        // ── Actualizar estado interno ─────────────────────────────────────────
         self.recent.push_back(self.position);
         if self.recent.len() > 500 { self.recent.pop_front(); }
 
-        self.position = new_pos;
+        self.position       = new_pos;
         self.visits[new_pos] += 1.0;
 
         self.rewards.push_back(reward);
@@ -263,44 +183,34 @@ pub fn crossover(a: &Bacteria, b: &Bacteria, rng: &mut XorShift32) -> Bacteria {
     let fb = b.recent_diversity().max(0.01);
     let pa = (fa / (fa + fb) * 100.0) as u32;
 
-    let mut emb = [[0f32; DIM]; 256];
-    let mut wq  = [[0f32; DIM]; DIM];
-    let mut wk  = [[0f32; DIM]; DIM];
-    let mut wv  = [[0f32; DIM]; DIM];
-    let mut ff1 = [[0f32; DIM]; 16];
-    let mut ff2 = [[0f32; 16]; DIM];
+    let rf  = |r: &mut XorShift32| r.next_u32() as f32 / u32::MAX as f32;
+    let mid = |x: f32, y: f32| (x + y) * 0.5;
 
-    for i in 0..256 { for j in 0..DIM {
-        emb[i][j] = if rng.next_u32() % 100 < pa
-            { a.transformer.embedding_matrix[i][j] } else { b.transformer.embedding_matrix[i][j] };
-    }}
-    for i in 0..DIM { for j in 0..DIM {
-        wq[i][j] = if rng.next_u32() % 100 < pa { a.transformer.attention_w_q[i][j] } else { b.transformer.attention_w_q[i][j] };
-        wk[i][j] = if rng.next_u32() % 100 < pa { a.transformer.attention_w_k[i][j] } else { b.transformer.attention_w_k[i][j] };
-        wv[i][j] = if rng.next_u32() % 100 < pa { a.transformer.attention_w_v[i][j] } else { b.transformer.attention_w_v[i][j] };
-    }}
-    for i in 0..16 { for j in 0..DIM {
-        ff1[i][j] = if rng.next_u32() % 100 < pa { a.transformer.ff_w1[i][j] } else { b.transformer.ff_w1[i][j] };
-    }}
-    for i in 0..DIM { for j in 0..16 {
-        ff2[i][j] = if rng.next_u32() % 100 < pa { a.transformer.ff_w2[i][j] } else { b.transformer.ff_w2[i][j] };
-    }}
+    let child_metabolism  = (mid(a.metabolism,  b.metabolism)  + (rf(rng)-0.5)*METABOLISM_RATE*0.4)
+                                .clamp(METABOLISM_RATE*0.3, METABOLISM_RATE*2.5);
+    let child_curiosity   = (mid(a.curiosity,   b.curiosity)   + (rf(rng)-0.5)*0.2)
+                                .clamp(0.2, 2.0);
+    let child_sociability = (mid(a.sociability, b.sociability) + (rf(rng)-0.5)*0.2)
+                                .clamp(0.2, 2.0);
+    let child_selectivity = (mid(a.selectivity, b.selectivity) + (rf(rng)-0.5)*0.1)
+                                .clamp(0.0, 1.0);
+    let child_altruism    = (mid(a.altruism,    b.altruism)    + (rf(rng)-0.5)*0.2)
+                                .clamp(0.2, 2.0);
 
-    let t = MiniTransformer {
-        embedding_matrix: emb, attention_w_q: wq, attention_w_k: wk,
-        attention_w_v: wv, ff_w1: ff1, ff_w2: ff2,
-        learning_rate: (a.transformer.learning_rate + b.transformer.learning_rate) / 2.0,
-    };
     Bacteria {
         position:    if rng.next_u32() % 2 == 0 { a.position } else { b.position },
-        state:       [0.0; DIM],
-        transformer: t,
+        ctrnn:       crossover_ctrnn(&a.ctrnn, &b.ctrnn, pa, rng),
         visits:      Box::new([0.0; GRID_SIZE]),
         recent:      VecDeque::with_capacity(50),
         rewards:     VecDeque::with_capacity(200),
         age:         0,
         cooldown:    COOLDOWN,
         rng:         XorShift32::new(rng.next_u32()),
-        energy:      (a.energy + b.energy) * 0.4,  // hereda 40% del promedio parental
+        energy:      (a.energy + b.energy) * 0.4,
+        metabolism:  child_metabolism,
+        curiosity:   child_curiosity,
+        sociability: child_sociability,
+        selectivity: child_selectivity,
+        altruism:    child_altruism,
     }
 }

@@ -1,14 +1,12 @@
 // Coordinador central: ticks, tablero, comida, reproducción, snapshots
 
 use std::sync::Arc;
-use std::collections::VecDeque;
-use std::time::Instant;
+use std::io::Write;
 use tokio::sync::mpsc;
 use crate::actor::{bacteria_loop, BacteriaMsg, GenomeRequest, StepResult};
 use crate::bacteria::{crossover, Bacteria, XorShift32};
 use crate::food::FoodAgent;
 use crate::world::*;
-use crate::display::{print_map, save_snapshot, save_history};
 
 // Metadatos livianos que el board guarda por cada bacteria activa
 struct BacteriaHandle {
@@ -40,15 +38,13 @@ pub async fn board_loop(mut rng: XorShift32) {
     let mut food_agents: Vec<FoodAgent> = (0..(MAX_FOOD / 3).max(3))
         .map(|_| FoodAgent::new(&mut rng))
         .collect();
+    // Genoma del último agente de comida muerto — se hereda (con mutación) al respawnear
+    let mut last_food_ctrnn: Option<crate::ctrnn::Ctrnn> = None;
+    let mut food_gen: u32 = 0;
 
-    // ── Snapshots y visualización ─────────────────────────────────────────────
-    let mut history: VecDeque<String> = VecDeque::with_capacity(100);
-    let mut last_snapshot    = Instant::now();
-    let mut last_print       = Instant::now();
-    let mut last_event_snap  = Instant::now();
-    let mut snapshot_count   = 0usize;
-    let mut q_prev_above     = false;
-    let mut step             = 0u32;
+    // ── Telemetría y progreso ─────────────────────────────────────────────────
+    crate::telemetry::init();
+    let mut step = 0u32;
 
     // ── Loop principal ────────────────────────────────────────────────────────
     loop {
@@ -91,12 +87,28 @@ pub async fn board_loop(mut rng: XorShift32) {
             world.memory[r.new_pos] = r.store;
             let fv          = snap.food[r.new_pos];
             let food_factor = 1.0 + fv / (FOOD_SIGNAL_THR + fv);
-            world.quorum[r.new_pos] += QUORUM_DEPOSIT * food_factor;
+            // bacteria hambrienta en celda con comida → pulso de alarma que la colonia puede seguir
+            let alarm = if fv > FOOD_SIGNAL_THR { 1.0 + r.hunger * HUNGER_ALARM_BOOST } else { 1.0 };
+            world.quorum[r.new_pos] += QUORUM_DEPOSIT * food_factor * alarm * r.altruism;
             for &n in &cardinal_neighbors(r.new_pos) {
-                world.quorum[n] += QUORUM_DEPOSIT * 0.3;
+                world.quorum[n] += QUORUM_DEPOSIT * 0.3 * r.altruism;
             }
         }
         for q in world.quorum.iter_mut() { *q *= QUORUM_DECAY; }
+
+        // Memoria colectiva: depósito continuo desde hot_cells de cada bacteria
+        for r in &results {
+            for &(cell, val) in &r.hot_cells {
+                world.stigma[cell] += STIGMA_DEPOSIT_LIVE * val;
+            }
+        }
+        // Pulso de muerte: el conocimiento individual se libera al sustrato
+        for r in results.iter().filter(|r| r.should_die) {
+            for &(cell, val) in &r.hot_cells {
+                world.stigma[cell] += STIGMA_DEPOSIT_DEATH * val;
+            }
+        }
+        for s in world.stigma.iter_mut() { *s = (*s * STIGMA_DECAY).min(STIGMA_SAT * 3.0); }
 
         // 4. Agentes de comida
         let qm_snap = world.quorum.clone();
@@ -111,30 +123,49 @@ pub async fn board_loop(mut rng: XorShift32) {
             for &n in &nbrs { world.food[n] += FOOD_SIGNAL * 0.5; }
         }
 
-        // Bacterias comen comida
+        // Bacterias comen comida — radio extendido: misma celda + vecinos cardinales
         for r in &results {
             if world.food[r.new_pos] > 0.0 {
                 world.food[r.new_pos] = (world.food[r.new_pos] - FOOD_EATEN).max(0.0);
-                for fa in food_agents.iter_mut() {
-                    if fa.position == r.new_pos { fa.energy -= FOOD_EATEN; }
+            }
+            for fa in food_agents.iter_mut() {
+                if fa.position == r.new_pos {
+                    fa.energy -= FOOD_EATEN;           // misma celda: daño completo
+                } else if cardinal_neighbors(fa.position).contains(&r.new_pos) {
+                    fa.energy -= FOOD_EATEN * 0.15;    // vecino: daño parcial (presión de proximidad)
                 }
             }
         }
         for fv in world.food.iter_mut() { *fv *= FOOD_DECAY; }
 
         // Ciclo de vida comida
+        // Guardar genoma del más longevo + registrar muertes en telemetría
+        for fa in food_agents.iter().filter(|fa| fa.energy <= 0.0) {
+            crate::telemetry::record_food_death(step, food_gen, fa);
+            food_gen += 1;
+        }
+        if let Some(fa) = food_agents.iter().filter(|fa| fa.energy <= 0.0).max_by_key(|fa| fa.age) {
+            last_food_ctrnn = Some(fa.ctrnn.clone());
+        }
         food_agents.retain(|fa| fa.energy > 0.0);
-        if food_agents.is_empty() { food_agents.push(FoodAgent::new(&mut rng)); }
+        if food_agents.is_empty() {
+            let pos = rng.next_u32() as usize % crate::world::GRID_SIZE;
+            let new_fa = match &last_food_ctrnn {
+                Some(ctrnn) => FoodAgent::from_genome(ctrnn, pos, &mut rng),
+                None        => FoodAgent::new(&mut rng),
+            };
+            food_agents.push(new_fa);
+        }
         let current_food = food_agents.len();
         let mut new_food: Vec<FoodAgent> = vec![];
         for fa in food_agents.iter_mut() {
-            if fa.energy > 200.0 && current_food + new_food.len() < MAX_FOOD {
+            if fa.energy > 120.0 && current_food + new_food.len() < MAX_FOOD {
                 fa.energy /= 2.0;
                 let nbrs      = cardinal_neighbors(fa.position);
                 let child_pos = nbrs[rng.next_u32() as usize % 4];
-                new_food.push(FoodAgent { position: child_pos, energy: fa.energy,
-                                          age: 0, recent: VecDeque::with_capacity(200),
-                                          rng: crate::bacteria::XorShift32::new(rng.next_u32()) });
+                let mut child = FoodAgent::from_genome(&fa.ctrnn, child_pos, &mut rng);
+                child.energy  = fa.energy;
+                new_food.push(child);
             }
         }
         food_agents.extend(new_food);
@@ -156,7 +187,17 @@ pub async fn board_loop(mut rng: XorShift32) {
                         let ra = &results[idxs[i]];
                         let rb = &results[idxs[j]];
                         if ra.cooldown > 0 || rb.cooldown > 0 { continue; }
-                        if rng.next_u32() % 100 >= REPRODUCE_PROB { continue; }
+                        // Gate de hambre: ambos padres deben estar suficientemente alimentados
+                        if ra.hunger > HUNGER_REPRO_THRESH || rb.hunger > HUNGER_REPRO_THRESH { continue; }
+                        // Gate de selectividad: bacterias exigentes evitan parejas con fitness muy distinto
+                        let fit_diff   = (ra.fitness - rb.fitness).abs();
+                        let avg_sel    = (ra.selectivity + rb.selectivity) * 0.5;
+                        let sel_gate   = (-fit_diff * avg_sel * 3.0).exp(); // 1.0 si idénticos, ~0 si muy distintos
+                        if rng.next_u32() as f32 / u32::MAX as f32 > sel_gate { continue; }
+                        // Probabilidad escala con fitness promedio: más fit → más reproducción
+                        let avg_fit = ((ra.fitness + rb.fitness) / 2.0).clamp(0.0, 3.0);
+                        let prob = ((REPRODUCE_PROB as f32) * (avg_fit / 1.5)).clamp(5.0, 80.0) as u32;
+                        if rng.next_u32() % 100 >= prob { continue; }
 
                         // Pedir genomas a ambas bacterias via oneshot
                         let child = request_crossover(
@@ -188,50 +229,26 @@ pub async fn board_loop(mut rng: XorShift32) {
         handles.retain(|(id, _)| !dead_ids.contains(id));
         if handles.is_empty() { handles.retain(|_| false); } // ya vacío, ok
 
-        // 6. Historial y visualización
-        if step % 10 == 0 {
-            let q_now = world.quorum.iter().cloned().fold(0f32, f32::max);
-            let f_now = world.food.iter().cloned().fold(0f32, f32::max);
-            let zones = colony_zones(&world.quorum);
-            let avg_fit = if results.is_empty() { 0.0 }
+        // 6. Telemetría
+        if step % 500 == 0 {
+            crate::telemetry::record_step(step, food_gen, &food_agents, &world, &results);
+        }
+
+        // Barra de progreso cada 10K pasos
+        if step % 10_000 == 0 {
+            let pct    = step as f32 / MAX_STEPS as f32 * 100.0;
+            let filled = (pct / 5.0) as usize;
+            let bar    = format!("{}{}", "=".repeat(filled), " ".repeat(20 - filled));
+            let fit_avg = if results.is_empty() { 0.0 }
                 else { results.iter().map(|r| r.fitness).sum::<f32>() / results.len() as f32 };
-            history.push_back(format!(
-                "paso={:>9}  pop={}  food={}  col={}  q={:.1}  f={:.1}  fit={:+.3}",
-                step, handles.len(), food_agents.len(), zones, q_now, f_now, avg_fit,
-            ));
-            if history.len() > 100 { history.pop_front(); }
+            let meta_avg = if results.is_empty() { 0.0 }
+                else { results.iter().map(|r| r.metabolism).sum::<f32>() / results.len() as f32 };
+            print!("\r[{bar}] {pct:5.1}%  paso {step:>7}/{MAX_STEPS}  pop={:>2}  food={}  fit={fit_avg:+.3}  meta={meta_avg:.5}",
+                handles.len(), food_agents.len());
+            let _ = std::io::stdout().flush();
         }
 
-        // Visualización y snapshots usando una población "plana" para display
-        // (construida desde los resultados del tick)
-        let q_now   = world.quorum.iter().cloned().fold(0f32, f32::max);
-        let q_above = q_now > QUORUM_EVENT_THRESH;
-
-        if last_print.elapsed().as_millis() >= 500 {
-            print_map(&results, &food_agents, &world.quorum, &world.food, step, handles.len());
-            last_print = Instant::now();
-        }
-
-        if q_above && !q_prev_above && snapshot_count < MAX_SNAPS
-            && last_event_snap.elapsed().as_secs() >= 5
-        {
-            snapshot_count += 1;
-            save_snapshot(&results, &food_agents, &world.quorum, &world.food,
-                          step, snapshot_count, "EVENTO");
-            save_history(&history);
-            last_event_snap = Instant::now();
-        }
-        q_prev_above = q_above;
-
-        if snapshot_count < MAX_SNAPS && last_snapshot.elapsed().as_secs() >= SNAP_INTERVAL_SECS {
-            snapshot_count += 1;
-            save_snapshot(&results, &food_agents, &world.quorum, &world.food,
-                          step, snapshot_count, "TIME");
-            save_history(&history);
-            last_snapshot = Instant::now();
-        }
-
-        if snapshot_count >= MAX_SNAPS { break; }
+        if step >= MAX_STEPS { println!(); break; }
         step += 1;
     }
 }
