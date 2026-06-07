@@ -1,9 +1,11 @@
 mod world;
+mod ctrnn;
 mod bacteria;
 mod food;
 mod actor;
 mod board;
 mod display;
+mod telemetry;
 
 use bacteria::XorShift32;
 
