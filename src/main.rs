@@ -6,6 +6,8 @@ mod actor;
 mod board;
 mod display;
 mod telemetry;
+mod observer;
+mod genome;
 
 use bacteria::XorShift32;
 

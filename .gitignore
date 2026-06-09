@@ -2,3 +2,11 @@
 snapshot_*.txt
 ultimo_historico.txt
 neurona_state.bin
+
+# Datos generados por la simulación
+*.csv
+population.bin
+/analysis/*.pdf
+/csvolds/
+/tmp/
+.DS_Store

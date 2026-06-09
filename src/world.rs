@@ -40,7 +40,7 @@ pub const ALTRUISM_COST:       f32 = 0.005; // coste energético por unidad de a
 
 // Memoria colectiva (estigma)
 pub const STIGMA_DECAY:        f32 = 0.9999;  // vida media ~7000 pasos
-pub const STIGMA_DEPOSIT_LIVE: f32 = 0.0001;  // depósito continuo por visita acumulada
+pub const STIGMA_DEPOSIT_LIVE: f32 = 0.002;   // depósito continuo por visita acumulada
 pub const STIGMA_DEPOSIT_DEATH: f32 = 0.005;  // pulso al morir — legado al sustrato
 pub const STIGMA_SAT:          f32 = 20.0;    // saturación para normalización sensorial
 

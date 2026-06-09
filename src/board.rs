@@ -26,11 +26,20 @@ pub async fn board_loop(mut rng: XorShift32) {
     let mut handles: Vec<(usize, BacteriaHandle)> = Vec::new();
     let mut next_id: usize = 0;
 
-    // ── Población inicial ─────────────────────────────────────────────────────
-    let step_size = GRID_SIZE / 4;
-    for i in 0..4 {
-        let mut b = Bacteria::new(&mut rng);
-        b.position = i * step_size;
+    // ── Población inicial — warm start si existe population.bin ──────────────
+    let seed_pop = crate::genome::load(crate::genome::POPULATION_FILE, &mut rng);
+    let initial: Vec<Bacteria> = match seed_pop {
+        Some(loaded) => loaded,
+        None => {
+            let step_size = GRID_SIZE / 4;
+            (0..4).map(|i| {
+                let mut b = Bacteria::new(&mut rng);
+                b.position = i * step_size;
+                b
+            }).collect()
+        }
+    };
+    for b in initial {
         spawn_bacteria(b, &mut next_id, &mut handles, action_tx.clone());
     }
 
@@ -43,8 +52,12 @@ pub async fn board_loop(mut rng: XorShift32) {
     let mut food_gen: u32 = 0;
 
     // ── Telemetría y progreso ─────────────────────────────────────────────────
-    crate::telemetry::init();
+    let run_start = now_str();
+    crate::telemetry::init(&run_start);
+    crate::observer::init(&run_start);
     let mut step = 0u32;
+    let mut stigma_aligned_w: u32 = 0;  // movimientos hacia mayor stigma (ventana 1K)
+    let mut stigma_moved_w:   u32 = 0;  // total movimientos (ventana 1K)
 
     // ── Loop principal ────────────────────────────────────────────────────────
     loop {
@@ -74,6 +87,18 @@ pub async fn board_loop(mut rng: XorShift32) {
                 }
 
                 None => break,
+            }
+        }
+
+        // Alineación stigma: ¿están las bacterias en zonas de mayor stigma que la media?
+        // (Métrica posicional: funciona también para bacterias sedentarias)
+        {
+            let mean_stigma = snap.stigma.iter().sum::<f32>() / snap.stigma.len() as f32;
+            for r in &results {
+                stigma_moved_w += 1;
+                if snap.stigma[r.new_pos] > mean_stigma {
+                    stigma_aligned_w += 1;
+                }
             }
         }
 
@@ -229,9 +254,14 @@ pub async fn board_loop(mut rng: XorShift32) {
         handles.retain(|(id, _)| !dead_ids.contains(id));
         if handles.is_empty() { handles.retain(|_| false); } // ya vacío, ok
 
-        // 6. Telemetría
+        // 6. Telemetría y observador científico
         if step % 500 == 0 {
             crate::telemetry::record_step(step, food_gen, &food_agents, &world, &results);
+        }
+        if step % 1000 == 0 {
+            crate::observer::record(step, &world, &results, stigma_aligned_w, stigma_moved_w);
+            stigma_aligned_w = 0;
+            stigma_moved_w   = 0;
         }
 
         // Barra de progreso cada 10K pasos
@@ -248,9 +278,56 @@ pub async fn board_loop(mut rng: XorShift32) {
             let _ = std::io::stdout().flush();
         }
 
-        if step >= MAX_STEPS { println!(); break; }
+        if step >= MAX_STEPS {
+            println!();
+            let run_end = now_str();
+            crate::telemetry::rename_with_end(&run_start, &run_end);
+            crate::observer::rename_with_end(&run_start, &run_end);
+
+            // Guardar genomas supervivientes para el próximo run
+            let mut survivors: Vec<Box<Bacteria>> = Vec::new();
+            for (id, h) in &handles {
+                let (tx, rx) = tokio::sync::oneshot::channel::<Box<Bacteria>>();
+                if h.genome_req_tx.send(tx).await.is_ok() {
+                    if let Ok(b) = rx.await { survivors.push(b); }
+                }
+                let _ = id;
+            }
+            let refs: Vec<&Bacteria> = survivors.iter().map(|b| b.as_ref()).collect();
+            crate::genome::save(crate::genome::POPULATION_FILE, &refs);
+
+            break;
+        }
         step += 1;
     }
+}
+
+// ── Utilidades ───────────────────────────────────────────────────────────────
+
+fn now_str() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let t  = secs % 86400;
+    let h  = t / 3600;
+    let m  = (t % 3600) / 60;
+    let s  = t % 60;
+
+    // Gregorian date desde epoch (algoritmo de Richards)
+    let z   = secs / 86400 + 719468;
+    let era = z / 146097;
+    let doe = z % 146097;
+    let yoe = (doe - doe/1460 + doe/36524 - doe/146096) / 365;
+    let y   = yoe + era * 400;
+    let doy = doe - (365*yoe + yoe/4 - yoe/100);
+    let mp  = (5*doy + 2) / 153;
+    let d   = doy - (153*mp + 2)/5 + 1;
+    let mo  = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y   = if mo <= 2 { y + 1 } else { y };
+
+    format!("{:04}-{:02}-{:02}_{:02}-{:02}-{:02}", y, mo, d, h, m, s)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────

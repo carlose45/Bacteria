@@ -1,20 +1,39 @@
 use std::fs::OpenOptions;
 use std::io::Write;
+use std::sync::OnceLock;
 use crate::actor::StepResult;
 use crate::food::FoodAgent;
 use crate::world::WorldState;
 
-pub fn init() {
-    match std::fs::File::create("telemetry.csv") {
-        Ok(mut f) => { let _ = writeln!(f, "step,pop,food_n,food_e_avg,food_age_avg,food_gen,\
+static TELE_PATH: OnceLock<String> = OnceLock::new();
+static FOOD_PATH: OnceLock<String> = OnceLock::new();
+
+pub fn init(prefix: &str) {
+    let tp = format!("telemetry_{}.csv", prefix);
+    let fp = format!("food_lineage_{}.csv", prefix);
+
+    if let Ok(mut f) = std::fs::File::create(&tp) {
+        let _ = writeln!(f, "step,pop,food_n,food_e_avg,food_age_avg,food_gen,\
                  q_max,q_avg,f_max,colonias,\
                  fit_avg,fit_min,fit_max,div_avg,hunger_avg,\
-                 metabolism_avg,curiosity_avg,sociability_avg,selectivity_avg,altruism_avg"); }
-        Err(e) => eprintln!("[telemetry] no se pudo crear telemetry.csv: {e}"),
-    }
-    match std::fs::File::create("food_lineage.csv") {
-        Ok(mut f) => { let _ = writeln!(f, "step,food_gen,food_age,food_energy,food_diversity"); }
-        Err(e) => eprintln!("[telemetry] no se pudo crear food_lineage.csv: {e}"),
+                 metabolism_avg,curiosity_avg,sociability_avg,selectivity_avg,altruism_avg");
+    } else { eprintln!("[telemetry] no se pudo crear {tp}"); }
+
+    if let Ok(mut f) = std::fs::File::create(&fp) {
+        let _ = writeln!(f, "step,food_gen,food_age,food_energy,food_diversity");
+    } else { eprintln!("[telemetry] no se pudo crear {fp}"); }
+
+    TELE_PATH.set(tp).ok();
+    FOOD_PATH.set(fp).ok();
+}
+
+pub fn rename_with_end(start: &str, end: &str) {
+    for name in &["telemetry", "food_lineage"] {
+        let old = format!("{}_{}.csv", name, start);
+        let new = format!("{}_{}_{}.csv", name, start, end);
+        if let Err(e) = std::fs::rename(&old, &new) {
+            eprintln!("[telemetry] no se pudo renombrar {old}: {e}");
+        }
     }
 }
 
@@ -42,7 +61,8 @@ pub fn record_step(
     let colonias = world.quorum.iter().filter(|&&q| q > crate::world::QUORUM_THRESH).count();
 
     let (fit_avg, fit_min, fit_max, div_avg, hunger_avg,
-         metabolism_avg, curiosity_avg, sociability_avg, selectivity_avg, altruism_avg) = if results.is_empty() {
+         metabolism_avg, curiosity_avg, sociability_avg, selectivity_avg, altruism_avg) =
+    if results.is_empty() {
         (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
     } else {
         let n = results.len() as f32;
@@ -60,7 +80,8 @@ pub fn record_step(
         )
     };
 
-    let Ok(mut f) = OpenOptions::new().append(true).open("telemetry.csv") else { return };
+    let path = TELE_PATH.get().map(|s| s.as_str()).unwrap_or("telemetry.csv");
+    let Ok(mut f) = OpenOptions::new().append(true).open(path) else { return };
     writeln!(f,
         "{},{},{},{:.2},{:.1},{},{:.3},{:.5},{:.2},{},{:.4},{:.4},{:.4},{:.4},{:.4},{:.6},{:.4},{:.4},{:.4},{:.4}",
         step, pop, food_n, food_e_avg, food_age_avg, food_gen,
@@ -71,7 +92,8 @@ pub fn record_step(
 }
 
 pub fn record_food_death(step: u32, food_gen: u32, fa: &FoodAgent) {
-    let Ok(mut f) = OpenOptions::new().append(true).open("food_lineage.csv") else { return };
+    let path = FOOD_PATH.get().map(|s| s.as_str()).unwrap_or("food_lineage.csv");
+    let Ok(mut f) = OpenOptions::new().append(true).open(path) else { return };
     writeln!(f, "{},{},{},{:.2},{:.4}",
         step, food_gen, fa.age, fa.energy, fa.diversity()
     ).unwrap();

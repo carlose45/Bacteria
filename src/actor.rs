@@ -62,9 +62,9 @@ pub async fn bacteria_loop(
                 let should_die = bacteria.age > crate::world::MAX_AGE
                     || bacteria.is_starving();
 
-                // Comprime las visitas: solo celdas con valor > 20 para no saturar el canal
+                // Comprime las visitas: celdas con valor > 3 (≈ visitada varias veces recientemente)
                 let hot_cells: Vec<(usize, f32)> = bacteria.visits.iter().enumerate()
-                    .filter(|(_, &v)| v > 20.0)
+                    .filter(|(_, &v)| v > 3.0)
                     .map(|(i, &v)| (i, v))
                     .collect();
 
